@@ -53,22 +53,31 @@ func (r *RateLimit) StartReadInput() {
 
 func (r *RateLimit) Process() {
 
-	limiter := make(chan struct{}, r.inFlight)
+	// quota run in second
+	rateLimiterChan := make(chan struct{}, r.inFlight)
+	for i := 0; i < r.inFlight; i++ {
+		rateLimiterChan <- struct{}{}
+	}
+
 	go func() {
-		for i := 0; i < r.inFlight; i++ {
-			limiter <- struct{}{}
-		}
 		for _ = range time.Tick(1000 * time.Millisecond / time.Duration(r.rate)) {
 			for i := 0; i < r.inFlight; i++ {
-				if len(limiter) == cap(limiter) { // if limit is full
+				if len(rateLimiterChan) == cap(rateLimiterChan) { // if limit is full
 					break
 				}
 
-				limiter <- struct{}{}
+				rateLimiterChan <- struct{}{}
 			}
 		}
 	}()
 
+	// max goroutines in time
+	inflightLimiterChan := make(chan struct{}, r.inFlight)
+	for i := 0; i < r.inFlight; i++ {
+		inflightLimiterChan <- struct{}{}
+	}
+
+	// process input stream
 	wg := sync.WaitGroup{}
 	for argsIn := range r.inputArgChan {
 		wg.Add(1)
@@ -76,9 +85,13 @@ func (r *RateLimit) Process() {
 		tmpArgLine := strings.ReplaceAll(r.command.args, CommandArgsReplacer, argsIn)
 		argsSl := strings.Split(tmpArgLine, " ")
 
-		<-limiter
+		<-rateLimiterChan
+		<-inflightLimiterChan
 		go func(cmdName string, args []string) {
-			defer wg.Done()
+			defer func() {
+				inflightLimiterChan <- struct{}{}
+				wg.Done()
+			}()
 
 			comm := exec.Command(cmdName, args...)
 			comm.Stdout = os.Stdout
@@ -89,7 +102,6 @@ func (r *RateLimit) Process() {
 			}
 		}(r.command.name, argsSl)
 	}
-
 	wg.Wait()
 }
 
